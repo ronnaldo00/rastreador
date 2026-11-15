@@ -35,6 +35,44 @@ function guardarConfig(c) {
 
 let config = leerConfig();
 
+// ---------- 1b. Pasar la configuración de un celular a otro ----------
+// localStorage es privado de cada navegador, así que la lista de celulares NO
+// viaja sola entre tu PC y tu celular. Para llevarla, generamos un ENLACE que
+// lleva la configuración metida adentro (codificada). Lo abres en el otro
+// aparato y se carga todo de una.
+
+// Convierte la config actual en un enlace que puedes abrir en otro celular.
+function enlaceConfig() {
+  const datos = { urlBase: config.urlBase, celulares: config.celulares };
+  // JSON -> texto -> base64 (para que quepa en una dirección web).
+  const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(datos))));
+  return location.origin + location.pathname + "#c=" + encodeURIComponent(b64);
+}
+
+// Si la página se abrió con un enlace de esos (…#c=XXXX), importa la config.
+// Devuelve true si importó algo.
+function importarDesdeEnlace() {
+  try {
+    const m = (location.hash || "").match(/c=([^&]+)/);
+    if (!m) return false;
+    const texto = decodeURIComponent(escape(atob(decodeURIComponent(m[1]))));
+    const datos = JSON.parse(texto);
+    if (datos && datos.urlBase && Array.isArray(datos.celulares)) {
+      config = {
+        urlBase: String(datos.urlBase).replace(/\/+$/, ""),
+        celulares: datos.celulares,
+        seleccionado: 0
+      };
+      guardarConfig(config);
+      // Limpiamos el enlace para que la clave no quede visible en la barra
+      // de direcciones ni en el historial del navegador.
+      history.replaceState(null, "", location.pathname + location.search);
+      return true;
+    }
+  } catch (e) { console.error("Enlace de configuración inválido:", e); }
+  return false;
+}
+
 // El celular que estamos viendo ahora (o null si no hay ninguno configurado).
 function celularActual() {
   if (!config.celulares.length) return null;
@@ -68,7 +106,10 @@ async function pedirUbicacion() {
   // Sin configuración no hay nada que pedir: mostramos los ajustes.
   if (!config.urlBase || !cel || cel.clave.length < 20) {
     ponerEstado("gris", "Falta configurar (toca ⚙️)");
-    abrirConfig();
+    // OJO: solo abrimos Ajustes si NO están ya abiertos. Si no, este temporizador
+    // (que corre cada 15 s) volvería a redibujar la ventana y te BORRARÍA lo que
+    // estás escribiendo. Ese era el bug de "pongo los datos y se borra todo".
+    if (!caja.classList.contains("visible")) abrirConfig();
     return;
   }
   try {
@@ -264,6 +305,24 @@ function filaCelular(nombre, clave) {
 
 document.getElementById("btn-config").onclick = abrirConfig;
 document.getElementById("btn-cancelar").onclick = cerrarConfig;
+
+// Botón "Copiar enlace para otro celular": arma el enlace y lo copia.
+document.getElementById("btn-enlace").onclick = async () => {
+  if (!config.urlBase || !config.celulares.length) {
+    alert("Primero guarda tu Firebase y al menos un celular.");
+    return;
+  }
+  const enlace = enlaceConfig();
+  try {
+    await navigator.clipboard.writeText(enlace);
+    alert("¡Enlace copiado! Mándatelo por WhatsApp a ti mismo y ábrelo en el otro " +
+          "celular: se cargarán todos tus celulares.\n\n⚠️ No lo compartas con nadie: " +
+          "lleva tus claves adentro.");
+  } catch (e) {
+    // Si el navegador no deja copiar solo, se lo mostramos para copiar a mano.
+    prompt("Copia este enlace y ábrelo en el otro celular:", enlace);
+  }
+};
 document.getElementById("btn-agregar").onclick = () => {
   document.getElementById("lista-celulares").appendChild(filaCelular("", ""));
 };
@@ -299,6 +358,8 @@ document.getElementById("btn-guardar").onclick = () => {
 };
 
 // ---------- 8. Arranque ----------
+// Si abriste la página con un enlace de configuración, cárgalo primero.
+importarDesdeEnlace();
 pintarSelector();
 pedirUbicacion();
 setInterval(pedirUbicacion, 15000);

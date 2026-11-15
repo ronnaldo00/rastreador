@@ -42,13 +42,27 @@
       gap: 12px;
       flex-wrap: wrap;
     }
-    header h1 { font-size: 18px; margin: 0; flex: 1; }
+    header h1 { font-size: 18px; margin: 0; }
+
+    /* El menú para elegir celular */
+    #selector-celular {
+      font: inherit;
+      background: var(--fondo);
+      color: var(--texto);
+      border: 1px solid var(--borde);
+      border-radius: 10px;
+      padding: 8px 10px;
+      flex: 1;
+      min-width: 120px;
+    }
+
     #estado {
       font-size: 13px;
       color: var(--suave);
       display: flex;
       align-items: center;
       gap: 6px;
+      width: 100%;
     }
     #punto-estado {
       width: 10px; height: 10px; border-radius: 50%;
@@ -90,8 +104,9 @@
       cursor: pointer;
     }
     button.gris { background: transparent; color: var(--suave); }
+    button.chico { padding: 6px 10px; font-size: 13px; }
 
-    /* ---- Ventana para pedir la configuración ---- */
+    /* ---- Ventana de Ajustes ---- */
     #config-caja {
       position: fixed; inset: 0;
       background: rgba(0,0,0,.6);
@@ -99,6 +114,7 @@
       align-items: center; justify-content: center;
       padding: 16px;
       z-index: 1000;
+      overflow-y: auto;
     }
     #config-caja.visible { display: flex; }
     .tarjeta {
@@ -106,7 +122,8 @@
       border: 1px solid var(--borde);
       border-radius: 16px;
       padding: 20px;
-      width: 100%; max-width: 420px;
+      width: 100%; max-width: 440px;
+      margin: auto;
     }
     .tarjeta h2 { margin-top: 0; }
     .tarjeta label { display: block; font-size: 13px; color: var(--suave); margin: 12px 0 4px; }
@@ -122,14 +139,29 @@
     .tarjeta .fila { display: flex; gap: 10px; margin-top: 16px; }
     .tarjeta .fila button { flex: 1; }
     .ayuda { font-size: 12px; color: var(--suave); margin-top: 6px; line-height: 1.4; }
+
+    /* La lista de celulares dentro de Ajustes */
+    #lista-celulares { display: flex; flex-direction: column; gap: 14px; margin-top: 6px; }
+    .cel-item {
+      border: 1px solid var(--borde);
+      border-radius: 12px;
+      padding: 12px;
+      background: var(--fondo);
+    }
+    .cel-item .cabecera { display: flex; align-items: center; gap: 8px; }
+    .cel-item .cabecera input { flex: 1; }
+    .cel-clave-fila { display: flex; gap: 8px; margin-top: 8px; }
+    .cel-clave-fila input { flex: 1; font-family: monospace; font-size: 13px; }
+    .quitar { background: transparent; color: var(--rojo); border-color: var(--borde); padding: 8px 10px; }
   </style>
 </head>
 <body>
 
   <header>
-    <h1>📍 Mi celular</h1>
+    <h1>📍</h1>
+    <select id="selector-celular" title="Elige qué celular ver"></select>
+    <button class="gris" id="btn-config">⚙️</button>
     <div id="estado"><span id="punto-estado"></span><span id="estado-texto">Conectando…</span></div>
-    <button class="gris" id="btn-config">⚙️ Ajustes</button>
   </header>
 
   <div id="datos">
@@ -141,16 +173,20 @@
 
   <div id="mapa"></div>
 
-  <!-- Ventana de ajustes (URL + clave) -->
+  <!-- Ventana de Ajustes: Firebase + lista de celulares -->
   <div id="config-caja">
     <div class="tarjeta">
-      <h2>Ajustes del rastreador</h2>
-      <label>Dirección de Firebase</label>
+      <h2>Ajustes</h2>
+
+      <label>Dirección de Firebase (una sola, para todos)</label>
       <input id="in-url" placeholder="https://mi-proyecto.firebaseio.com">
-      <label>Clave secreta del celular</label>
-      <input id="in-clave" placeholder="20 letras o más">
-      <p class="ayuda">Estos datos se guardan solo en este navegador. Deben ser
-        los mismos que pusiste dentro de la app del celular.</p>
+
+      <label style="margin-top:18px;">Mis celulares</label>
+      <p class="ayuda">Cada celular necesita su propia clave (20 letras o más).
+        Debe ser la misma que pusiste dentro de la app de ese celular.</p>
+      <div id="lista-celulares"></div>
+      <button class="gris chico" id="btn-agregar" style="margin-top:10px;">+ Agregar celular</button>
+
       <div class="fila">
         <button class="gris" id="btn-cancelar">Cancelar</button>
         <button id="btn-guardar">Guardar</button>

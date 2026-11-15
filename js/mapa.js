@@ -1,56 +1,73 @@
-// La página que muestra dónde está el celular.
-// Lo que hace, en resumen:
-//   1. Averigua la URL de Firebase y la clave (de config.js o de lo guardado).
-//   2. Cada 15 segundos LEE la última ubicación del "buzón" (un GET).
+// La página que muestra dónde están mis celulares.
+// Novedad: maneja VARIOS celulares. Cada uno tiene un nombre y su propia clave.
+// Arriba hay un menú para elegir cuál ver.
+//
+// Cómo funciona, en resumen:
+//   1. Guarda una lista de celulares (nombre + clave) y una sola URL de Firebase.
+//   2. Cada 15 segundos LEE la última ubicación del celular elegido (un GET).
 //   3. Mueve el punto en el mapa y actualiza los datos (hace cuánto, batería…).
 //
 // La página NUNCA habla con el celular directamente: las dos hablan con Firebase.
 
-// ---------- 1. Configuración (URL + clave) ----------
-// Primero lo que esté guardado en este navegador; si no, lo de config.js.
+// ---------- 1. Configuración (URL + lista de celulares) ----------
+// Formato guardado:
+//   { urlBase: "...", seleccionado: 0, celulares: [ {nombre, clave}, ... ] }
 function leerConfig() {
-  let guardado = {};
-  try { guardado = JSON.parse(localStorage.getItem("rastreador") || "{}"); } catch (e) {}
+  let g = {};
+  try { g = JSON.parse(localStorage.getItem("rastreador") || "{}"); } catch (e) {}
+
+  // Compatibilidad: si venías de la versión vieja {urlBase, clave}, lo convertimos.
+  if (g.clave && !g.celulares) {
+    g = { urlBase: g.urlBase, seleccionado: 0, celulares: [{ nombre: "Mi celular", clave: g.clave }] };
+  }
+
   const base = window.CONFIG || {};
   return {
-    urlBase: (guardado.urlBase || base.urlBase || "").replace(/\/+$/, ""),
-    clave: guardado.clave || base.clave || ""
+    urlBase: (g.urlBase || base.urlBase || "").replace(/\/+$/, ""),
+    celulares: Array.isArray(g.celulares) ? g.celulares : [],
+    seleccionado: Number.isInteger(g.seleccionado) ? g.seleccionado : 0
   };
 }
 
-function guardarConfig(urlBase, clave) {
-  localStorage.setItem("rastreador", JSON.stringify({ urlBase, clave }));
+function guardarConfig(c) {
+  localStorage.setItem("rastreador", JSON.stringify(c));
 }
 
 let config = leerConfig();
 
+// El celular que estamos viendo ahora (o null si no hay ninguno configurado).
+function celularActual() {
+  if (!config.celulares.length) return null;
+  const i = Math.min(config.seleccionado, config.celulares.length - 1);
+  return config.celulares[i];
+}
+
 // ---------- 2. El mapa ----------
-// Arranca mirando a Tunja hasta que llegue el primer dato.
 const mapa = L.map("mapa").setView([5.535, -73.367], 13);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: "© OpenStreetMap"
 }).addTo(mapa);
-
-// Leaflet busca sus iconos en una carpeta; se la decimos a mano.
 L.Icon.Default.prototype.options.imagePath = "vendor/images/";
 
 let marcador = null;      // el "pin" en el mapa
 let circulo = null;       // el círculo de precisión alrededor del pin
+let recorrido = null;     // la línea del recorrido (historial)
 let yaCentre = false;     // para centrar el mapa solo la primera vez
 let ultimoDato = null;    // el último reporte recibido
-let recorrido = null;     // la línea del recorrido (historial)
 
 // ---------- 3. Leer el buzón ----------
-// Construye la dirección: urlBase + "/celulares/" + clave + "/ultima.json"
+// urlBase + "/celulares/" + clave + "/" + sufijo + ".json"
 function direccion(sufijo) {
-  return `${config.urlBase}/celulares/${encodeURIComponent(config.clave)}/${sufijo}.json`;
+  const cel = celularActual();
+  return `${config.urlBase}/celulares/${encodeURIComponent(cel.clave)}/${sufijo}.json`;
 }
 
 async function pedirUbicacion() {
+  const cel = celularActual();
   // Sin configuración no hay nada que pedir: mostramos los ajustes.
-  if (!config.urlBase || config.clave.length < 20) {
-    ponerEstado("gris", "Falta configurar (toca ⚙️ Ajustes)");
+  if (!config.urlBase || !cel || cel.clave.length < 20) {
+    ponerEstado("gris", "Falta configurar (toca ⚙️)");
     abrirConfig();
     return;
   }
@@ -59,7 +76,7 @@ async function pedirUbicacion() {
     if (!resp.ok) throw new Error("respuesta " + resp.status);
     const dato = await resp.json();
     if (!dato || typeof dato.lat !== "number") {
-      ponerEstado("gris", "Aún no hay reportes de este celular");
+      ponerEstado("gris", "Aún no hay reportes de «" + cel.nombre + "»");
       return;
     }
     ultimoDato = dato;
@@ -74,12 +91,10 @@ async function pedirUbicacion() {
 // Lee el historial y dibuja la línea del recorrido (los últimos 50 puntos).
 async function pintarRecorrido() {
   try {
-    // orderBy="$key"&limitToLast=50 → los 50 reportes más recientes.
     const resp = await fetch(direccion("historial") + '?orderBy="$key"&limitToLast=50', { cache: "no-store" });
     if (!resp.ok) return;
     const hist = await resp.json();
-    if (!hist) return;
-    // Ordenar por la hora (la llave) y sacar la lista de coordenadas.
+    if (!hist) { if (recorrido) { recorrido.remove(); recorrido = null; } return; }
     const puntos = Object.keys(hist).sort()
       .map((k) => hist[k])
       .filter((d) => d && typeof d.lat === "number")
@@ -96,15 +111,9 @@ async function pintarRecorrido() {
 // ---------- 4. Pintar en pantalla ----------
 function pintar(dato) {
   const punto = [dato.lat, dato.lng];
+  if (!marcador) marcador = L.marker(punto).addTo(mapa);
+  else marcador.setLatLng(punto);
 
-  // El pin
-  if (!marcador) {
-    marcador = L.marker(punto).addTo(mapa);
-  } else {
-    marcador.setLatLng(punto);
-  }
-
-  // El círculo de precisión (qué tan seguro está el GPS, en metros)
   if (dato.precision) {
     if (!circulo) {
       circulo = L.circle(punto, { radius: dato.precision, color: "#4f7cff", opacity: .4, fillOpacity: .1 }).addTo(mapa);
@@ -113,16 +122,12 @@ function pintar(dato) {
     }
   }
 
-  // Centrar el mapa solo la primera vez (para no estorbar si estás mirando otra zona)
   if (!yaCentre) { mapa.setView(punto, 16); yaCentre = true; }
 
-  // Globo con la hora al tocar el pin
   marcador.bindPopup(`Visto ${haceCuanto(dato.hora)}<br>${new Date(dato.hora).toLocaleString()}`);
-
   actualizarDatos(dato);
 }
 
-// Rellena la fila de tarjetas de arriba.
 function actualizarDatos(dato) {
   document.getElementById("d-hace").textContent = haceCuanto(dato.hora);
   document.getElementById("d-bateria").textContent =
@@ -132,14 +137,12 @@ function actualizarDatos(dato) {
   document.getElementById("d-velocidad").textContent =
     dato.velocidad != null ? Math.round(dato.velocidad * 3.6) + " km/h" : "—";
 
-  // Verde si reportó hace menos de 5 min; rojo si hace rato.
   const minutos = (Date.now() - dato.hora) / 60000;
   if (minutos < 5) ponerEstado("vivo", "En línea · " + haceCuanto(dato.hora));
   else ponerEstado("viejo", "Última vez " + haceCuanto(dato.hora));
 }
 
 // ---------- 5. Ayudantes ----------
-// Convierte una hora (en milisegundos) en "hace 2 min", "hace 1 h"…
 function haceCuanto(hora) {
   const seg = Math.max(0, Math.floor((Date.now() - hora) / 1000));
   if (seg < 60) return "hace " + seg + " s";
@@ -158,30 +161,145 @@ function ponerEstado(clase, texto) {
   document.getElementById("estado-texto").textContent = texto;
 }
 
-// ---------- 6. Ventana de ajustes ----------
+// Genera una clave secreta nueva al azar (24 letras y números).
+function generarClave() {
+  const letras = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let s = "";
+  for (let i = 0; i < 24; i++) s += letras[Math.floor(Math.random() * letras.length)];
+  return s;
+}
+
+// ---------- 6. El menú de celulares (arriba) ----------
+function pintarSelector() {
+  const sel = document.getElementById("selector-celular");
+  sel.innerHTML = "";
+  if (!config.celulares.length) {
+    const op = document.createElement("option");
+    op.textContent = "(sin celulares)";
+    sel.appendChild(op);
+    sel.style.display = "none";
+    return;
+  }
+  sel.style.display = "";
+  config.celulares.forEach((c, i) => {
+    const op = document.createElement("option");
+    op.value = i;
+    op.textContent = c.nombre || ("Celular " + (i + 1));
+    if (i === config.seleccionado) op.selected = true;
+    sel.appendChild(op);
+  });
+}
+
+// Al cambiar de celular en el menú: reiniciamos el mapa y pedimos su ubicación.
+document.getElementById("selector-celular").onchange = (e) => {
+  config.seleccionado = Number(e.target.value);
+  guardarConfig(config);
+  reiniciarMapa();
+  pedirUbicacion();
+};
+
+// Borra el pin, el círculo y el recorrido (para empezar limpio con otro celular).
+function reiniciarMapa() {
+  if (marcador) { marcador.remove(); marcador = null; }
+  if (circulo) { circulo.remove(); circulo = null; }
+  if (recorrido) { recorrido.remove(); recorrido = null; }
+  ultimoDato = null;
+  yaCentre = false;
+}
+
+// ---------- 7. Ventana de Ajustes ----------
 const caja = document.getElementById("config-caja");
+
 function abrirConfig() {
   document.getElementById("in-url").value = config.urlBase;
-  document.getElementById("in-clave").value = config.clave;
+  pintarListaConfig(config.celulares.length ? config.celulares : [{ nombre: "", clave: "" }]);
   caja.classList.add("visible");
 }
 function cerrarConfig() { caja.classList.remove("visible"); }
 
+// Dibuja la lista editable de celulares dentro de Ajustes.
+function pintarListaConfig(celulares) {
+  const cont = document.getElementById("lista-celulares");
+  cont.innerHTML = "";
+  celulares.forEach((c) => cont.appendChild(filaCelular(c.nombre, c.clave)));
+}
+
+// Crea una fila (nombre + clave + botones) para un celular.
+function filaCelular(nombre, clave) {
+  const item = document.createElement("div");
+  item.className = "cel-item";
+
+  const cab = document.createElement("div");
+  cab.className = "cabecera";
+  const inNombre = document.createElement("input");
+  inNombre.className = "cel-nombre";
+  inNombre.placeholder = "Nombre (ej. Moto, Cel de mamá)";
+  inNombre.value = nombre || "";
+  const btnQuitar = document.createElement("button");
+  btnQuitar.className = "quitar";
+  btnQuitar.textContent = "🗑";
+  btnQuitar.title = "Quitar este celular";
+  btnQuitar.onclick = () => item.remove();
+  cab.appendChild(inNombre);
+  cab.appendChild(btnQuitar);
+
+  const filaClave = document.createElement("div");
+  filaClave.className = "cel-clave-fila";
+  const inClave = document.createElement("input");
+  inClave.className = "cel-clave";
+  inClave.placeholder = "Clave (20 letras o más)";
+  inClave.value = clave || "";
+  const btnGen = document.createElement("button");
+  btnGen.className = "gris chico";
+  btnGen.textContent = "Generar";
+  btnGen.title = "Crear una clave nueva al azar";
+  btnGen.onclick = () => { inClave.value = generarClave(); };
+  filaClave.appendChild(inClave);
+  filaClave.appendChild(btnGen);
+
+  item.appendChild(cab);
+  item.appendChild(filaClave);
+  return item;
+}
+
 document.getElementById("btn-config").onclick = abrirConfig;
 document.getElementById("btn-cancelar").onclick = cerrarConfig;
+document.getElementById("btn-agregar").onclick = () => {
+  document.getElementById("lista-celulares").appendChild(filaCelular("", ""));
+};
+
 document.getElementById("btn-guardar").onclick = () => {
   const url = document.getElementById("in-url").value.trim().replace(/\/+$/, "");
-  const clave = document.getElementById("in-clave").value.trim();
-  if (clave.length < 20) { alert("La clave debe tener 20 letras o más."); return; }
-  guardarConfig(url, clave);
-  config = leerConfig();
-  yaCentre = false;
+  // Recoger todos los celulares de la lista.
+  const items = document.querySelectorAll("#lista-celulares .cel-item");
+  const celulares = [];
+  for (const it of items) {
+    const nombre = it.querySelector(".cel-nombre").value.trim();
+    const clave = it.querySelector(".cel-clave").value.trim();
+    if (!clave && !nombre) continue;        // fila vacía: la ignoramos
+    if (clave.length < 20) {
+      alert("La clave de «" + (nombre || "un celular") + "» debe tener 20 letras o más.");
+      return;
+    }
+    celulares.push({ nombre: nombre || ("Celular " + (celulares.length + 1)), clave });
+  }
+  if (!url) { alert("Escribe la dirección de Firebase."); return; }
+  if (!celulares.length) { alert("Agrega al menos un celular con su clave."); return; }
+
+  config = {
+    urlBase: url,
+    celulares,
+    seleccionado: Math.min(config.seleccionado, celulares.length - 1)
+  };
+  guardarConfig(config);
+  pintarSelector();
+  reiniciarMapa();
   cerrarConfig();
   pedirUbicacion();
 };
 
-// ---------- 7. Arranque: pedir ya y luego cada 15 segundos ----------
+// ---------- 8. Arranque ----------
+pintarSelector();
 pedirUbicacion();
 setInterval(pedirUbicacion, 15000);
-// Refresca el "hace X min" cada segundo aunque no llegue dato nuevo.
 setInterval(() => { if (ultimoDato) actualizarDatos(ultimoDato); }, 1000);

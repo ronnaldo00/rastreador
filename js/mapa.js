@@ -35,42 +35,94 @@ function guardarConfig(c) {
 
 let config = leerConfig();
 
-// ---------- 1b. Pasar la configuración de un celular a otro ----------
-// localStorage es privado de cada navegador, así que la lista de celulares NO
-// viaja sola entre tu PC y tu celular. Para llevarla, generamos un ENLACE que
-// lleva la configuración metida adentro (codificada). Lo abres en el otro
-// aparato y se carga todo de una.
+// ---------- 1b. Enlaces: compartir y pasar la configuración ----------
+// localStorage es privado de cada navegador. Para llevar datos de un aparato a
+// otro usamos ENLACES que llevan la info metida adentro (codificada). Hay DOS:
+//   #ver=…  → ver UN solo celular (para compartir con alguien; NO se guarda).
+//   #c=…    → TODA mi configuración (para MI otro aparato; sí se guarda).
 
-// Convierte la config actual en un enlace que puedes abrir en otro celular.
-function enlaceConfig() {
-  const datos = { urlBase: config.urlBase, celulares: config.celulares };
-  // JSON -> texto -> base64 (para que quepa en una dirección web).
-  const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(datos))));
-  return location.origin + location.pathname + "#c=" + encodeURIComponent(b64);
+// ¿Estamos viendo un enlace COMPARTIDO de un solo celular? (no se guarda nada)
+let modoCompartido = false;
+
+// Guarda un objeto como base64 apto para meter en una dirección web, y al revés.
+function aBase64(obj) {
+  return encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(obj)))));
+}
+function deBase64(s) {
+  return JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(s)))));
 }
 
-// Si la página se abrió con un enlace de esos (…#c=XXXX), importa la config.
-// Devuelve true si importó algo.
+// Enlace con TODA mi configuración, para pasarla a MI otro aparato (se guarda allá).
+function enlaceConfig() {
+  return location.origin + location.pathname + "#c=" +
+    aBase64({ urlBase: config.urlBase, celulares: config.celulares });
+}
+
+// Enlace para COMPARTIR UN SOLO celular con otra persona. Quien lo abra verá
+// únicamente ese celular; NO se le guarda ni se mezcla con lo que ya tenga.
+function enlaceVer(url, nombre, clave) {
+  return location.origin + location.pathname + "#ver=" +
+    aBase64({ urlBase: url, nombre: nombre, clave: clave });
+}
+
+// Copia un texto al portapapeles (con plan B si el navegador no deja).
+async function copiar(texto, mensajeOk) {
+  try { await navigator.clipboard.writeText(texto); alert(mensajeOk); }
+  catch (e) { prompt("Copia este enlace:", texto); }
+}
+
+// Si la página se abrió con un enlace (#ver=… o #c=…), lo aplica.
+// Devuelve true si aplicó algo.
 function importarDesdeEnlace() {
-  try {
-    const m = (location.hash || "").match(/c=([^&]+)/);
-    if (!m) return false;
-    const texto = decodeURIComponent(escape(atob(decodeURIComponent(m[1]))));
-    const datos = JSON.parse(texto);
-    if (datos && datos.urlBase && Array.isArray(datos.celulares)) {
-      config = {
-        urlBase: String(datos.urlBase).replace(/\/+$/, ""),
-        celulares: datos.celulares,
-        seleccionado: 0
-      };
-      guardarConfig(config);
-      // Limpiamos el enlace para que la clave no quede visible en la barra
-      // de direcciones ni en el historial del navegador.
-      history.replaceState(null, "", location.pathname + location.search);
-      return true;
-    }
-  } catch (e) { console.error("Enlace de configuración inválido:", e); }
+  const h = location.hash || "";
+
+  // 1) Enlace COMPARTIDO de un solo celular: se VE, pero NO se guarda ni pisa
+  //    la lista que tenga quien lo abre.
+  let m = h.match(/ver=([^&]+)/);
+  if (m) {
+    try {
+      const d = deBase64(m[1]);
+      if (d && d.urlBase && d.clave) {
+        config = {
+          urlBase: String(d.urlBase).replace(/\/+$/, ""),
+          celulares: [{ nombre: d.nombre || "Celular", clave: d.clave }],
+          seleccionado: 0
+        };
+        modoCompartido = true;
+        history.replaceState(null, "", location.pathname + location.search);
+        return true;
+      }
+    } catch (e) { console.error("Enlace compartido inválido:", e); }
+  }
+
+  // 2) Enlace con TODA mi configuración: se guarda en ESTE navegador.
+  m = h.match(/c=([^&]+)/);
+  if (m) {
+    try {
+      const d = deBase64(m[1]);
+      if (d && d.urlBase && Array.isArray(d.celulares)) {
+        config = {
+          urlBase: String(d.urlBase).replace(/\/+$/, ""),
+          celulares: d.celulares,
+          seleccionado: 0
+        };
+        guardarConfig(config);
+        history.replaceState(null, "", location.pathname + location.search);
+        return true;
+      }
+    } catch (e) { console.error("Enlace de configuración inválido:", e); }
+  }
   return false;
+}
+
+// En modo compartido ocultamos Ajustes y el menú: quien recibe el enlace solo
+// mira ESE celular y no puede ver (ni tocar) los demás.
+function aplicarModoCompartido() {
+  if (!modoCompartido) return;
+  document.getElementById("btn-config").style.display = "none";
+  document.getElementById("selector-celular").style.display = "none";
+  const cel = celularActual();
+  if (cel) document.querySelector("header h1").textContent = "📍 " + cel.nombre;
 }
 
 // El celular que estamos viendo ahora (o null si no hay ninguno configurado).
@@ -129,6 +181,39 @@ async function pedirUbicacion() {
   }
 }
 
+// Distancia en METROS entre dos puntos {lat,lng} (fórmula de Haversine).
+function metrosEntre(a, b) {
+  const R = 6371000;                 // radio de la Tierra en metros
+  const rad = (x) => x * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 +
+            Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// Limpia el recorrido para que NO dibuje movimientos falsos:
+//   - descarta lecturas muy imprecisas (la ubicación por RED da el centro de la
+//     ciudad, con cientos de metros de error);
+//   - descarta "saltos" imposibles (más de ~180 km/h = teletransporte);
+//   - cuando el celular está quieto, no amontona puntos (ruido del GPS parado).
+// Devuelve una lista de [lat, lng] lista para la línea.
+function filtrarRecorrido(lista) {
+  const buenos = [];
+  for (const d of lista) {
+    if (typeof d.precision === "number" && d.precision > 120) continue; // muy impreciso
+    const ult = buenos[buenos.length - 1];
+    if (ult) {
+      const metros = metrosEntre(ult, d);
+      const seg = Math.max(1, (d.hora - ult.hora) / 1000);
+      const velocidad = metros / seg;            // m/s
+      if (velocidad > 50 && metros > 150) continue; // salto imposible → basura
+      if (metros < 8) continue;                     // casi no se movió → no repetir
+    }
+    buenos.push(d);
+  }
+  return buenos.map((d) => [d.lat, d.lng]);
+}
+
 // Lee el historial y dibuja la línea del recorrido (los últimos 50 puntos).
 async function pintarRecorrido() {
   try {
@@ -136,11 +221,13 @@ async function pintarRecorrido() {
     if (!resp.ok) return;
     const hist = await resp.json();
     if (!hist) { if (recorrido) { recorrido.remove(); recorrido = null; } return; }
-    const puntos = Object.keys(hist).sort()
+    // Ordenamos por hora y limpiamos la basura (ver filtrarRecorrido) para que
+    // la línea NO muestre movimientos que no se hicieron.
+    const crudos = Object.keys(hist).sort()
       .map((k) => hist[k])
-      .filter((d) => d && typeof d.lat === "number")
-      .map((d) => [d.lat, d.lng]);
-    if (puntos.length < 2) return;
+      .filter((d) => d && typeof d.lat === "number" && typeof d.lng === "number");
+    const puntos = filtrarRecorrido(crudos);
+    if (puntos.length < 2) { if (recorrido) { recorrido.remove(); recorrido = null; } return; }
     if (!recorrido) {
       recorrido = L.polyline(puntos, { color: "#4f7cff", weight: 4, opacity: .6 }).addTo(mapa);
     } else {
@@ -298,30 +385,44 @@ function filaCelular(nombre, clave) {
   filaClave.appendChild(inClave);
   filaClave.appendChild(btnGen);
 
+  // Botón "Compartir SOLO este celular": crea un enlace de solo-ver ese celular.
+  const btnCompartir = document.createElement("button");
+  btnCompartir.className = "gris chico";
+  btnCompartir.textContent = "🔗 Compartir solo este";
+  btnCompartir.style.marginTop = "8px";
+  btnCompartir.title = "Enlace para que alguien vea SOLO este celular";
+  btnCompartir.onclick = () => {
+    const url = document.getElementById("in-url").value.trim().replace(/\/+$/, "");
+    const clv = inClave.value.trim();
+    const nom = inNombre.value.trim() || "Celular";
+    if (!url) { alert("Primero escribe la dirección de Firebase arriba."); return; }
+    if (clv.length < 20) { alert("Este celular necesita una clave de 20 letras o más."); return; }
+    copiar(enlaceVer(url, nom, clv),
+      "¡Enlace de «" + nom + "» copiado!\n\nQuien lo abra verá SOLO este celular, " +
+      "no los demás. Puedes mandárselo por WhatsApp.");
+  };
+
   item.appendChild(cab);
   item.appendChild(filaClave);
+  item.appendChild(btnCompartir);
   return item;
 }
 
 document.getElementById("btn-config").onclick = abrirConfig;
 document.getElementById("btn-cancelar").onclick = cerrarConfig;
 
-// Botón "Copiar enlace para otro celular": arma el enlace y lo copia.
-document.getElementById("btn-enlace").onclick = async () => {
+// Botón "Copiar TODA mi configuración": enlace con TODOS mis celulares, para MI
+// otro aparato. OJO: lleva TODAS las claves; no es para compartir con otros.
+document.getElementById("btn-enlace").onclick = () => {
   if (!config.urlBase || !config.celulares.length) {
     alert("Primero guarda tu Firebase y al menos un celular.");
     return;
   }
-  const enlace = enlaceConfig();
-  try {
-    await navigator.clipboard.writeText(enlace);
-    alert("¡Enlace copiado! Mándatelo por WhatsApp a ti mismo y ábrelo en el otro " +
-          "celular: se cargarán todos tus celulares.\n\n⚠️ No lo compartas con nadie: " +
-          "lleva tus claves adentro.");
-  } catch (e) {
-    // Si el navegador no deja copiar solo, se lo mostramos para copiar a mano.
-    prompt("Copia este enlace y ábrelo en el otro celular:", enlace);
-  }
+  copiar(enlaceConfig(),
+    "¡Enlace copiado! Es para TU otro aparato: mándatelo por WhatsApp a ti mismo " +
+    "y ábrelo ahí; se cargarán TODOS tus celulares.\n\n⚠️ No se lo mandes a otras " +
+    "personas: lleva todas tus claves. Para compartir uno solo, usa el botón " +
+    "«🔗 Compartir solo este» de cada celular.");
 };
 document.getElementById("btn-agregar").onclick = () => {
   document.getElementById("lista-celulares").appendChild(filaCelular("", ""));
@@ -358,9 +459,10 @@ document.getElementById("btn-guardar").onclick = () => {
 };
 
 // ---------- 8. Arranque ----------
-// Si abriste la página con un enlace de configuración, cárgalo primero.
+// Si abriste la página con un enlace (compartido o de configuración), aplícalo.
 importarDesdeEnlace();
 pintarSelector();
+aplicarModoCompartido();   // si es un enlace compartido, oculta ajustes y menú
 pedirUbicacion();
 setInterval(pedirUbicacion, 15000);
 setInterval(() => { if (ultimoDato) actualizarDatos(ultimoDato); }, 1000);
